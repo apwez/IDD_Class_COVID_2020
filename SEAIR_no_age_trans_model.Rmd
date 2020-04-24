@@ -1,0 +1,544 @@
+---
+output: html_document
+---
+
+
+#### COVID-19 Transmission with no age mixing
+
+Guide for running and interpreting SEAIR model results
+
+Updated `r Sys.Date()`
+
+Prepared by: Alex Becker, Sophie Berube, Kyra Grantz, Sonia Hegde, Forrest Jones, Amy Wesolowski
+
+
+ -------------------------------
+
+#### Dependencies
+
+Note that version numbers provided are recommendations; code may run with different versions but results have not been verified
+
+ - R 			version >= 3.6.1  
+ - `socialmixr`		version 0.1.6  
+ - `magrittr`		version 1.5  
+ - `stringr`			version 1.4  
+ - `reshape2`		version 1.4.3  
+ - `dplyr`			version 0.83  
+ - `ggplot2`		version 3.2.1  
+ - `truncnorm`    version 1.0.8
+ 
+
+```{r setup, include=FALSE}
+
+  require(socialmixr)
+  require(magrittr)
+  require(stringr)
+  require(reshape2)
+  require(dplyr)
+  require(ggplot2)
+  require(truncnorm)
+
+```
+
+
+ -------------------------------
+
+#### Data Input
+
+Currently, the only required data input for this model is the population size. The directory and file name are fed into the `setup_seir_model` function.
+
+ -------------------------------
+
+#### Functions
+
+This document has 2 different functions to (1) run the discrete time simulation and (2) set up all of the parameters/etc. for the discrete time simulation. This function does not include age mixing patterns and just focuses on a single well-mixed population. 
+
+ -------------------------------
+
+(2) `setup_seir_model`
+
+This function is the only function which should require edits. It returns output with all parameters needed to run the transmission model. Several of these values need to be directly defined in the function arguments below.
+
+Note that this same function is used to run the initial setup for `sair_step_variableR0`, which allows  `R0` to change over time. The `R0`output of this function will **not** be used in the model runs; rather, R0 will be recalculated in the `sair_step_variableR0` funtcion at each time point. Similarly, the `ICs` output from this function will ignored in `sair_step` and `sair_step_variableR0` if `stoch.init=TRUE`.
+
+Inputs to `setup_seir_model`:
+
+- `stoch`: binary TRUE/FALSE for whether there should be stochasticity added to the force of infection for each age category, at each time point
+
+- `R0`: the basic reproductive number of our model
+
+- `gamma` - the rate of recovering once infectious; here, set to be 1/6.5d
+
+- `sigma` - the rate of becoming infectious following exposure to SARS-CoV-2; here, set to be 1/5.2d
+
+- `prop_symptomatic` - the proportion of infections assumed to develop symptoms; here, set to be 0.2.
+
+- `beta1` - the amplitude of the seasonal forcing function for $\beta_t$; here, equal to 0, removing seasonal forcing from the model.
+
+- `phase` - $a$, or the phase in the seasonal forcing function for $\beta_t$
+
+- `mu` - the birth rate in the population; here, set to be 0
+
+- `v` - the natural death rate in the population; here, set to be 0
+
+- `sd.dw` - the standard deviation for the stochasticity added to event rates at each time step; here, set to be 0.05
+
+- `pop` - the size of your population; here, set to be 1e6 but should be changed for your actual population size
+
+
+This function returns a list with objects:
+
+- `beta0` - the intercept, or baseline infectiousness, of the seasonal forcing function for $\beta_t$; a function of `R0`, `gamma`, `sigma`, and `v`.
+
+- `beta1` - the amplitude of the seasonal forcing function for $\beta_t$; here, equal to 0, removing seasonal forcing from the model.
+
+- `phase` - $a$, or the phase in the seasonal forcing function for $\beta_t$
+
+- `mu` - the birth rate in the population; here, set to be 0
+
+- `v` - the natural death rate in the population; here, set to be 0
+
+- `ICs` - The initial condition to start the model run, as a vector with number of individuals in each category. Here, we begin the model with 8 asymptomatically infected individuals and 2 symptomatically infected individuals in each age/other category.
+
+- `N` - the population size
+
+- `gamma` - the rate of recovering once infectious; here, set to be 1/6.5d
+
+- `sigma` - the rate of becoming infectious following exposure to SARS-CoV-2; here, set to be 1/5.2d
+
+- `prop_symptomatic` - the proportion of infections assumed to develop symptoms
+
+
+```{r setup_seir_model}
+setup_seir_model <- function(stoch, R0, 
+                             gamma=1/6.5, sigma=1/5.2,
+                             phase=0, beta1=0, mu=0, v=0,
+                             prop_symptomatic = 0.2, sd.dw=0.05, pop = 1e6){
+  
+  ## set prop_symtomatic
+  prop_symptomatic <- prop_symptomatic
+  ## crudely set A = 8, I = 2, but should be changed!!! 
+  
+  ICs <- c(S = pop, E = 0, A = 8, I = 2, R = 1, incid_A = 0, incid_I = 0)
+  ## set the R compartment
+  
+  ## population sizes by demographic data
+  N <- pop 
+  
+  ## units in days!! 
+  gamma <- gamma ## infectious period
+  sigma <- sigma ## latent period
+  phase <- phase ## when should seasonal forcing peak?
+  mu <- mu ## set births to be zero currently
+  v <- v ## set natural death rate to be zero currently
+  #R0 <- 2.5 ## make a range?   ## R0 = beta * sigma / ((sigma + v) * (v + gamma)) for SEAIR model with split proportion into A-I and only A and I contributing to infection
+  beta0 <- R0 * (gamma + v) * (sigma + v) / sigma ## set beta based on that value
+  beta1 <- beta1 ## seasonal forcing should be modest here
+  sd.dw <- sd.dw
+  R0 = beta0 * sigma / ( (sigma + v) * (v + gamma))
+  
+  return(list(beta0 = beta0, beta1 = beta1, 
+              phase = phase, mu = mu, v = v, ICs = ICs, 
+              N=N, gamma=gamma, sd.dw=sd.dw,
+              sigma = sigma, prop_symptomatic=prop_symptomatic))
+}
+```
+
+ -------------------------------
+
+(1) `sair_step`
+
+This is the critical function which runs the SEAIR model. It requires the following inputs:
+
+- `stoch`: binary TRUE/FALSE for whether there should be stochasticity added to the force of infection for each age category, at each time point
+
+- `stoch.init`: binary TRUE/FALSE for whether the initial conditions should be randomly drawn, and therefore varied between simulations (even when given the same `ICs` argument)
+
+- `ICs`: The initial condition to start the model run, as a vector with number of individuals in each category. Can be pulled from the output of `setup_seir_model`.
+
+- `params`: a list of parameter values and objects, generated by the `setup_seir_model` model. Code is provided below to generate a list from the output of `setup_seir_model`.
+
+- `time`: the sequence of time-steps over which to run the model (e.g., `time <- seq(0, 300, delta.t)`)
+
+- `delta.t`: the time-step to use in the model; we recommend using at least daily time-steps, if not finer granularity
+
+- `init.min`: the minimum number of infected individuals at t=0; only used if `stoch.init=TRUE`
+
+- `init.max`: the maximum number of infected individuals at t=0; only used if `stoch.init=TRUE`
+
+- `init.dist`: gives the relative number of initial infections (in absolute numbers - **not** incidence) in each category If not specified, initial infections will be distributed to categories propotional to population size.
+
+This function returns an object with the number of individuals in each model compartment (SEAIR + incidA (incident asymptomatic cases) + incidI (incident infectious cases)), per time point.
+
+```{r sair_step}
+
+sair_step <- function(stoch = F, stoch.init = F, ICs, params, time, delta.t, init.min = 10, init.max=60, init.dist = NULL){
+  beta0 = params$beta0
+  beta1 = params$beta1
+  phase = params$phase
+  mu = params$mu
+  v = params$v
+  N=params$N
+  sigma = params$sigma
+  gamma=params$gamma
+  prop_symptomatic=params$prop_symptomatic
+  sd.dw <- params$sd.dw
+
+  ## set up a matrix to store values in by variable and time
+  ## each X[it,] is the variable at one hour
+  x <- matrix(NA,length(time),7)
+  
+  ## set initial conditions
+  if(stoch.init){
+    Ninit <- sample(init.min:init.max, 1)
+    if(is.null(init.dist)){pinit <- N / sum(N)}else{pinit <- init.dist}
+    Ninit = multinom(1, Ninit, prob = pinit)[1]
+    Ninit_asy <- round(Ninit * (1-prop_symptomatic))
+    Ninit_sym <- Ninit - Ninit_asy
+    ICs <- c(S = N, E = 0, A = Ninit_asy, I = Ninit_sym, R = 0, incid_A = 0, incid_I = 0)
+    x[1,] <- round(ICs)
+  }
+  else{ x[1,] <- round(ICs) }
+
+  S <- x[,1]; ## susceptible individuals
+  E <- x[,2]; ## exposed individuals 
+  A <- x[,3]; ## asymptomatic individuals
+  I <- x[,4];## symp individuals
+  R <- x[,5] ## recovered individuals
+  
+  ## incidence
+  incid_A <- x[,6]
+  incid_I <- x[,7]
+  
+  ## seasonal transmission
+  seas <- beta0 * (1 + beta1 * cos(2 * pi * time/365 - phase))
+  
+  for(it in 1:(length(time) - 1)){
+    births <- mu
+    deaths <- v
+    ## add stochasticity to FOI
+    if(stoch == T){
+      dw <- rtruncnorm(1, a=0, mean = 1, sd = sd.dw)
+    }else{
+      dw <- 1
+    }
+
+    ## declare transitions in model
+    foi_prob <- 1 - exp( - seas[it] * (A[it]+I[it]) * dw * delta.t)
+    exposed_prob <- 1 - exp( - sigma * delta.t)
+    inf_prob <- 1 - exp( - gamma * delta.t)
+    death_prob <- 1 - exp( - deaths * delta.t)
+    
+    ## stochastic formulation of the model
+    if(stoch == T){
+      new_exp <- rbinom(n = 1, size = round(S[it]), prob = foi_prob)
+      new_inf <- rbinom(n = 1, size = round(E[it]) , prob = exposed_prob)
+      new_infA <- round( (1-prop_symptomatic)*new_inf )
+      new_infI <- new_inf - new_infA
+      new_rec_A <- rbinom(n = 1, size = round(A[it]), prob = inf_prob)
+      new_rec_I <- rbinom(n = 1, size = round(I[it]), prob = inf_prob)
+      
+      S[it + 1] <- S[it] +  births*delta.t - new_exp - rbinom(n = 1, size = round(S[it]), prob = death_prob)
+      E[it + 1] <- E[it] +  new_exp - new_inf - rbinom(n = 1, size = round(E[it]), prob = death_prob )
+      A[it + 1] <- A[it] +  new_infA - new_rec_A - rbinom(n = 1, size = round(A[it]), prob = death_prob)
+      I[it + 1] <- I[it] +  new_infI - new_rec_I - rbinom(n = 1, size = round(I[it]), prob = death_prob)
+      R[it + 1] <- R[it] +  new_rec_I + new_rec_A - rbinom(n = 1, size = round(R[it]), prob = death_prob)
+      
+      ## make incidence the new number of daily individuals becoming infected
+      incid_A[it] <- new_infA
+      incid_I[it] <- new_infI
+    }
+    
+    ## deterministic equations
+    if(stoch == F){
+      S[it + 1] <- S[it] + delta.t * (births - seas[it] * (A[it]+I[it]) * S[it] * dw / N  - deaths*S[it])
+      E[it + 1] <- E[it] + delta.t * (seas[it] * (A[it]+I[it]) * S[it] * dw / N - deaths*E[it] - sigma*E[it])
+      A[it + 1] <- A[it] + delta.t * ( (1 - prop_symptomatic)*sigma*E[i,] - A[it]*(gamma - deaths))
+      I[it + 1] <- I[it] + delta.t * (  prop_symptomatic*sigma*E[it] - I[it]*(gamma - deaths) )
+      R[it + 1] <- R[it] + delta.t * (A[it]*gamma+ I[it]*gamma - R[it]* deaths)
+      incid_A[it] <-  (1 - prop_symptomatic)*(seas[it] * (A[it]+I[it])  * S[it] * dw / N)
+      incid_I[it] <- prop_symptomatic*(seas[it] * (A[it]+I[it])  * S[it] * dw / N)
+    }
+  }
+  out <- data.frame(cbind(time,S,E,A,I,R,incid_A, incid_I))
+  names(out) <- c('time',names(ICs))
+  ## output is the number in each class per time point per age-category+homeless+healthcare workers
+  return(out)
+}
+
+
+```
+
+ -------------------------------
+
+(6) `sair_step_variableR0`
+
+This is an adaptation of `sair_step` which allows R0 to vary across time. It requires some input from `setup_sair_model` (run with the first R0 value for t=1), along with `time`, `delta.t`, and a vector of R0 values at each time step:
+
+- `stoch`: binary TRUE/FALSE for whether there should be stochasticity added to the force of infection for each age category, at each time point
+
+- `stoch.init`: binary TRUE/FALSE for whether the initial conditions should be randomly drawn, and therefore varied between simulations (even when given the same `ICs` argument)
+
+- `R0vec`: a vector of the R0 value at each time step in the model. This must have the same length as `time`.
+
+- `ICs`: The initial condition to start the model run, as a vector with number of individuals in each category. Can be pulled from the output of `setup_seir_model`.
+
+- `params`: a list of parameter values and objects, generated by the `setup_seir_model` model run for `R0vec[1]`. Code is provided below to generate a list from the output of `setup_seir_model`. Note that in this function `params$R0` is always ignored, `params$ICs` will be ignored if `stoch.init=TRUE`.
+
+- `time`: the sequence of time-steps over which to run the model (e.g., `time <- seq(0, 300, delta.t)`)
+
+- `delta.t`: the time-step to use in the model; we recommend using at least daily time-steps, if not finer granularity
+
+- `init.min`: the minimum number of infected individuals at t=0; only used if `stoch.init=TRUE`
+
+- `init.max`: the maximum number of infected individuals at t=0; only used if `stoch.init=TRUE`
+
+- `init.dist`: gives the relative number of initial infections (in absolute numbers - **not** incidence).
+
+This function returns an object with the number of individuals in each model compartment (SEAIR + incidA (incident asymptomatic cases) + incidI (incident infectious cases)), per time point.
+
+```{r sair_step_variableR0}
+
+
+sair_step_variableR0 <- function(stoch = F, stoch.init = F, R0vec, ICs, params, time, delta.t, init.min = 10, init.max=60, init.dist = NULL){
+  beta0 = params$beta0
+  beta1 = params$beta1
+  phase = params$phase
+  mu = params$mu
+  v = params$v
+  N=params$N
+  sigma = params$sigma
+  gamma=params$gamma
+  prop_symptomatic=params$prop_symptomatic
+  sd.dw <- params$sd.dw
+
+  ## set up a matrix to store values in by variable and time
+  ## each X[it,] is the variable at one hour
+  x <- matrix(NA,length(time),7)
+  
+  ## set initial conditions
+  if(stoch.init){
+    Ninit <- sample(init.min:init.max, 1)
+    if(is.null(init.dist)){pinit <- N / sum(N)}else{pinit <- init.dist}
+    Ninit = multinom(1, Ninit, prob = pinit)[1]
+    Ninit_asy <- round(Ninit * (1-prop_symptomatic))
+    Ninit_sym <- Ninit - Ninit_asy
+    ICs <- c(S = N, E = 0, A = Ninit_asy, I = Ninit_sym, R = 0, incid_A = 0, incid_I = 0)
+    x[1,] <- round(ICs)
+  }
+  else{ x[1,] <- round(ICs) }
+
+  S <- x[,1]; ## susceptible individuals
+  E <- x[,2]; ## exposed individuals 
+  A <- x[,3]; ## asymptomatic individuals
+  I <- x[,4];## symp individuals
+  R <- x[,5] ## recovered individuals
+  
+  ## incidence
+  incid_A <- x[,6]
+  incid_I <- x[,7]
+  
+  ## seasonal transmission
+  beta0 <- R0vec * (gamma + v) * (sigma + v) / sigma 
+  seas <- beta0 * (1 + beta1 * cos(2 * pi * time/365 - phase))
+
+  for(it in 1:(length(time) - 1)){
+    births <- mu
+    deaths <- v
+    ## add stochasticity to FOI
+    if(stoch == T){
+      dw <- rtruncnorm(1, a=0, mean = 1, sd = sd.dw)
+    }else{
+      dw <- 1
+    }
+
+    ## declare transitions in model
+    foi_prob <- 1 - exp( - seas[it] * (A[it]+I[it])* dw * delta.t)
+    exposed_prob <- 1 - exp( - sigma * delta.t)
+    inf_prob <- 1 - exp( - gamma * delta.t)
+    death_prob <- 1 - exp( - deaths * delta.t)
+    
+    ## stochastic formulation of the model
+    if(stoch == T){
+      new_exp <- rbinom(n = 1, size = round(S[it]), prob = foi_prob)
+      new_inf <- rbinom(n = 1, size = round(E[it]) , prob = exposed_prob)
+      new_infA <- round( (1-prop_symptomatic)*new_inf )
+      new_infI <- new_inf - new_infA
+      new_rec_A <- rbinom(n = 1, size = round(A[it]), prob = inf_prob)
+      new_rec_I <- rbinom(n = 1, size = round(I[it]), prob = inf_prob)
+      
+      S[it + 1] <- S[it] +  births*delta.t - new_exp - rbinom(n = 1, size = round(S[it]), prob = death_prob)
+      E[it + 1] <- E[it] +  new_exp - new_inf - rbinom(n = 1, size = round(E[it]), prob = death_prob )
+      A[it + 1] <- A[it] +  new_infA - new_rec_A - rbinom(n = 1, size = round(A[it]), prob = death_prob)
+      I[it + 1] <- I[it] +  new_infI - new_rec_I - rbinom(n = 1, size = round(I[it]), prob = death_prob)
+      R[it + 1] <- R[it] +  new_rec_I + new_rec_A - rbinom(n = 1, size = round(R[it]), prob = death_prob)
+      
+      ## make incidence the new number of daily individuals becoming infected
+      incid_A[it] <- new_infA
+      incid_I[it] <- new_infI
+    }
+    
+    ## deterministic equations
+    if(stoch == F){
+      S[it + 1] <- S[it] + delta.t * (births - seas[it] * (A[it]+I[it]) * S[it] * dw / N  - deaths*S[it])
+      E[it + 1] <- E[it] + delta.t * (seas[it] * (A[it]+I[it]) * S[it] * dw / N - deaths*E[it] - sigma*E[it])
+      A[it + 1] <- A[it] + delta.t * ( (1 - prop_symptomatic)*sigma*E[it] - A[it]*(gamma - deaths))
+      I[it + 1] <- I[it] + delta.t * (  prop_symptomatic*sigma*E[it] - I[it]*(gamma - deaths) )
+      R[it + 1] <- R[it] + delta.t * (A[it]*gamma+ I[it]*gamma - R[it]* deaths)
+      incid_A[it] <-  (1 - prop_symptomatic)*(seas[it] * (A[it]+I[it])  * S[it] * dw / N)
+      incid_I[it] <- prop_symptomatic*(seas[it] * (A[it]+I[it])  * S[it] * dw / N)
+    }
+  }
+  out <- data.frame(cbind(time,S,E,A,I,R,incid_A, incid_I))
+  names(out) <- c('time',names(ICs))
+  ## output is the number in each class per time point per age-category+homeless+healthcare workers
+  return(out)
+}
+
+```
+
+
+ -------------------------------
+
+#### Setting up a model run - constant R0
+
+First, run the `setup_seir_model` function to produce the necessary parameters and data input for the model. It should print out the correct $R_0$ value. If not, confirm the correct inputs to the `setup_seir_model` function. A reminder that `age.limits` is the lower limit of each age category in the raw population data; the age categories included in this model will combine all age categories >75y into a single category.
+
+```{r initial_run R0}
+pop = 1e6
+prop_symptomatic = 0.2
+all_prelim_info <- setup_seir_model(stoch = TRUE, R0 = 3.0, prop_symptomatic = prop_symptomatic, pop = pop)
+```
+
+Next, create the parameter object to read into the `sair_step` function and to set up the time vector across which to run the model.
+
+```{r initial_run time}
+
+  # Assuming here a 1 day time step and a model run for 300 days
+  delta.t <- 1/1
+  time <- seq(1,300,by = delta.t)
+  
+  # setting up the parameter and ICs values for input into sair_step
+  N = all_prelim_info$N
+  ICs = all_prelim_info$ICs
+  params = list(beta0 = all_prelim_info$beta0, 
+                beta1 = all_prelim_info$beta1, 
+                phase = all_prelim_info$phase, 
+                mu = all_prelim_info$mu, 
+                v = all_prelim_info$v, 
+                N=all_prelim_info$N, 
+                gamma=all_prelim_info$gamma, 
+                sigma = all_prelim_info$sigma, 
+                prop_symptomatic=all_prelim_info$prop_symptomatic,
+                sd.dw = all_prelim_info$sd.dw,
+                N = all_prelim_info$N)
+```
+
+
+ -------------------------------
+
+#### Running a single simulation and exploring output - constant R0
+
+Now, we use these input to run a single, stochastic iteration of the model with the inputs defined above.
+
+```{r sim1}
+  single.sim <- sair_step(stoch = TRUE, stoch.init=F, ICs, params, time, delta.t)
+```
+
+ -------------------------------
+
+#### Running multiple simulations - constant R0
+
+For the sake of preparing this document, the code below will not run, but provides the structure for running more than one simulation at a time. Note that the stochasticity has been increased here (`sd.dw=0.2`).
+
+```{r multiple_sim, eval=FALSE}
+  # setup functions
+  pop = 1e6
+  prop_symptomatic = 0.2
+  all_prelim_info <- setup_seir_model(stoch = TRUE, R0 = 3.0, prop_symptomatic = prop_symptomatic, pop = pop)
+  # Assuming here a 1 day time step and a model run for 300 days
+  delta.t <- 1/1
+  time <- seq(1,300,by = delta.t)
+  
+  # setting up the parameter and ICs values for input into sair_step
+  N = all_prelim_info$N
+  ICs = all_prelim_info$ICs
+  params = list(beta0 = all_prelim_info$beta0, 
+                beta1 = all_prelim_info$beta1, 
+                phase = all_prelim_info$phase, 
+                mu = all_prelim_info$mu, 
+                v = all_prelim_info$v, 
+                N=all_prelim_info$N, 
+                gamma=all_prelim_info$gamma, 
+                sigma = all_prelim_info$sigma, 
+                prop_symptomatic=all_prelim_info$prop_symptomatic,
+                sd.dw = all_prelim_info$sd.dw,
+                N = all_prelim_info$N)
+
+  # Multiple simulation setup
+  nsim <- 50
+  all_sim <- matrix(NA,1,7+2)
+  
+  colnames(all_sim) <- c('run_index', 'time', 'S', 'E', 'A', 'I', 'R', 'incid_A', 'incid_I')
+  
+  for(n in 1:nsim){
+    ## run the simulation one time
+    single.sim <- sair_step(stoch = TRUE, stoch.init=F, ICs, params, time, delta.t)
+    #add on a value for the run_index (simulation number)
+    run_index = rep(n, nrow(single.sim))
+    single.sim <- cbind(run_index, single.sim)
+    all_sim <- rbind(all_sim, single.sim)
+  }
+  all_sim <- all_sim[-1,]
+  # write.csv(all_sim, file = 'filename.csv')
+
+  # code to test and plot simulations
+  xx <- all_sim %>% select(starts_with("incid_I")) %>% rowSums()
+  xx <- cbind(xx, all_sim%>%select(run_index, time))
+  ggplot(xx, aes(x=time, y=xx, group=run_index)) + geom_line(alpha=0.3)
+  
+```
+
+
+ -------------------------------
+
+#### Setting up a model run - variable R0
+
+This functions requires a nearly identical setup as `sair_step`. The key differences are:
+
+- Must provide `R0vec`, a vector of the same length as `time` which contains the R0 value at each time step.
+
+
+```{r initial_run variable R0}
+  pop = 1e6
+  prop_symptomatic = 0.2
+  all_prelim_info <- setup_seir_model(stoch = TRUE, R0 = 3.0, prop_symptomatic = prop_symptomatic, pop = pop)
+  # Assuming here a 1 day time step and a model run for 300 days
+  delta.t <- 1/1
+  time <- seq(1,300,by = delta.t)
+  
+  # setting up the parameter  and ICs values for input into sair_step
+  N = all_prelim_info$N
+  ICs = all_prelim_info$ICs
+  params = list(beta0 = all_prelim_info$beta0, 
+                beta1 = all_prelim_info$beta1, 
+                phase = all_prelim_info$phase, 
+                mu = all_prelim_info$mu, 
+                v = all_prelim_info$v, 
+                N=all_prelim_info$N, 
+                gamma=all_prelim_info$gamma, 
+                sigma = all_prelim_info$sigma, 
+                prop_symptomatic=all_prelim_info$prop_symptomatic,
+                sd.dw = all_prelim_info$sd.dw,
+                N = all_prelim_info$N)
+  
+  R0vec <- rep(3, length(time))
+  R0vec[31:90] <- 1.7
+  R0vec[91:120] <- 2.2
+  
+  single.sim <- sair_step_variableR0(stoch = F, stoch.init = F, R0vec, ICs, params, time, delta.t, init.min = 10, init.max=60, init.dist = NULL)
+  
+```
+
+ -------------------------------
+

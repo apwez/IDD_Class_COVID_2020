@@ -1,0 +1,81 @@
+---
+output: html_document
+---
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+
+#Here we create a probability matrix of working probabilities from the literature for the probability of becoming a hospitalized case, getting admitted to ICU, needing a ventilator and death. These are nested conditional probabilities that rely on the following assumptions:
+#The percentage of hospitalized cases in each category is obtained from the [CDC](https://www.cdc.gov/mmwr/volumes/69/wr/mm6912e2.htm#T1_down) where we combined the 55-74 age groups and the 75-80 and 80+ age groups.
+#We assume the remainder of the nested probabilities from the [CDC](https://www.cdc.gov/mmwr/volumes/69/wr/mm6912e2.htm#T1_down) and in each subsequent state (hospitalization to ICU, ICU to death) we shift the denominator to be the preceding state's total (e.g. the probability of getting admitted to the ICU is the number of ICU cases for the age group/number of hospitalized cases for the age group).
+#We assume a global probability that 25% of cases admitted to the ICU require a ventilator per [WHO reports](https://www.who.int/publications-detail/report-of-the-who-china-joint-mission-on-coronavirus-disease-2019-(covid-19)).  
+#We assume healthcare workers and the homeless population follow a similar nested probability scheme as those in the 45-54 year age group.
+#Note that this function takes the raw numbers of people in each disease state and converts it to a probability. 
+#importantly, if you look at your final probability matrix and you have a value that is strictly less than 0 or striclty greater than 1 you have made a mistake in entering your data!!
+
+#each num_diseaseState vector is an arugement of this function, these vectors should be numeric vectors of length 7 (for the seven age groups) and each value should correspond to the raw numbers of people in each disease state observed for each particular age group. 
+
+#also note that if you divide by 0, you will get NaN (not a number) as an entry, if that just means that 0 percent are in that disease state for age categories, you can manually replace NaN with 0. 
+
+make_prob_matrix<- function(num_symptomatic,num_severe, num_hospitalized, num_ICU, num_deadFromICU,num_vent, num_deadFromVent){
+
+prob_severe<- num_severe/num_symptomatic
+prob_hospitalized<- num_hospitalized/num_severe
+prob_ICU<- num_ICU/num_hospitalized
+prob_dead_from_icu<-num_deadFromICU/num_ICU
+prob_vent_icu<- num_vent/num_ICU
+prob_dead_from_vent<- num_deadFromVent/num_vent
+prob_matrix<- cbind(prob_severe,prob_hospitalized,prob_ICU,prob_dead_from_icu,
+                     prob_vent_icu,prob_dead_from_vent)
+
+return(prob_matrix)
+}
+
+#cdc inputs (4% death)
+
+symptomatic_4<- c(123,705,429,838,354,429,429)
+hosp_4<- c(3.08,146.64,121.41,307.05,224.5,121.41,121.41)
+ICU_4<-c(0,29.61,44.62,124.94,106.86,44.62,44.62)
+dead_ICU_4<- c(0, 1.16,2.93,22.19,32.86,2.93,2.93)
+vent_4<- c(0,1,2.5,22.01,51,2.5,2.5)
+dead_vent_4<- c(0,0.25,0.5,9,28.5,0.5,0.5)
+
+prob_matrix_4<- make_prob_matrix(symptomatic_4,hosp_4,hosp_4,ICU_4,dead_ICU_4,vent_4,dead_vent_4)
+prob_matrix_4[1,c(4,5,6)]<- c(0,0,0)
+
+#2% Death rate
+
+symptomatic_2<- c(123,705,429,838,354,429,429)
+hosp_2<- c(3.08,146.64,121.41,307.05,224.5,121.41,121.41)
+ICU_2<-c(0,29.61,44.62,124.94,106.86,44.62,44.62)
+dead_ICU_2<- c(0, 0.58,1.465,11.095,16.435,1.465,1.465)
+vent_2<- c(0,1,2.5,22.01,51,2.5,2.5)
+dead_vent_2<- c(0,0.125,0.25,4.5,14.25,0.25,0.25)
+
+prob_matrix_2<- make_prob_matrix(symptomatic_2,hosp_2,hosp_2,ICU_2,dead_ICU_2,vent_2,dead_vent_2)
+prob_matrix_2[1,c(4,5,6)]<- c(0,0,0)
+
+
+#1%death rate
+
+symptomatic_1<- c(123,705,429,838,354,429,429)
+hosp_1<- c(3.08,146.64,121.41,307.05,224.5,121.41,121.41)
+ICU_1<-c(0,29.61,44.62,124.94,106.86,44.62,44.62)
+dead_ICU_1<- c(0, 0.29,0.7325,5.5475,8.2175,0.7325,0.7325)
+vent_1<- c(0,1,2.5,22.01,51,2.5,2.5)
+dead_vent_1<- c(0,0.062,0.125,2.25,7.125,0.125,0.125)
+
+prob_matrix_1<- make_prob_matrix(symptomatic_1,hosp_1,hosp_1,ICU_1,dead_ICU_1,vent_1,dead_vent_1)
+prob_matrix_1[1,c(4,5,6)]<- c(0,0,0)
+
+
+#define number of days simulations run for
+n_days <- 299 #number of days minus 1
+sims <- 1000
+start_date <- "2020-03-01"
+end_date <- "2020-08-02"
+prob_matrix <- prob_matrix_2
+  
+```
+
+
+
